@@ -1,1 +1,592 @@
+USE [mimicIV]
+SELECT [subject_id]
+      ,[hadm_id]
+      ,[seq_num]
+      ,[icd_code]
+      ,[icd_version]
+FROM [mimicIV].[dbo].[diagnoses_icd]
+--4,756,326
+
+------------------STEP 1  create the patient list-------------------
+--1.1 creat the patient list having AMI
+SELECT [subject_id], COUNT([subject_id]) AS AMI_count
+INTO #AMI_1
+FROM [dbo].[diagnoses_icd]
+WHERE ([icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) IN ('410'))
+OR ([icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('I21', 'I22'))
+GROUP BY [subject_id]
+ORDER BY AMI_count DESC;
+--9,703
+SELECT * FROM #AMI_1
+
+--1.2 creat the patient list having AMI with hadm_id
+SELECT [subject_id], [hadm_id]
+INTO #AMI_2
+FROM [dbo].[diagnoses_icd]
+WHERE [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) IN ('410') 
+OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('I21', 'I22')
+GROUP BY [subject_id], [hadm_id];
+--(12187 rows affected)
+
+--DROP TABLE #AMI_3
+--1.3 the lastest AMI adittime and dod of patients
+SELECT a.subject_id, 
+       MAX(ad.[admittime]) AS latest_AMI_admittime, 
+	   MAX([dod]) AS dod
+INTO #AMI_3
+FROM #AMI_2 AS a,
+[dbo].[admissions] AS ad,
+[dbo].[patients] AS p
+WHERE a.hadm_id = ad.hadm_id
+AND p.subject_id = a.subject_id
+GROUP BY a.subject_id;
+--9,703
+SELECT * FROM #AMI_3
+WHERE DATEDIFF(DAY, latest_AMI_admittime, dod) BETWEEN 0 AND 30
+
+------------------STEP 2  create the input variables-------------------
+--2.1 create demographics as input
+SELECT
+    ad.subject_id,
+    ad.hadm_id,
+    pa.gender,
+    pa.anchor_age + DATEDIFF(YEAR, pa.anchor_year, ad.admittime) AS age,
+	ad.marital_status,
+	ad.race
+INTO #demographics1
+FROM [dbo].[admissions] AS ad
+INNER JOIN [dbo].[patients] AS pa
+ON ad.subject_id = pa.subject_id;
+--431231 rows affected
+SELECT * FROM #demographics1;
+
+--2.2 create AMI_history count as input 
+SELECT subject_id,
+	   (CONVERT(INT, AMI_count)- 1) AS AMIhistory_count
+INTO #AMIhistory_count
+FROM #AMI_1
+ORDER BY AMIhistory_count DESC;
+--(9703 rows affected)
+
+--2.3 create comorbidities in patients hospitalised with AMI as input
+SELECT a3.subject_id, a.hadm_id, d.icd_code, d.icd_version
+INTO #diagnose
+FROM #AMI_3 AS a3,
+	 [dbo].[diagnoses_icd] AS d,
+	 [dbo].[admissions] AS a
+WHERE a3.subject_id = d.subject_id
+AND a3.subject_id = a.subject_id
+AND a3.latest_AMI_admittime = a.admittime;
+--(644119 rows affected)
+
+SELECT subject_id, 
+	   --congestive_heart_failure
+	   MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) IN ('428') 
+				  OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 5) IN ('39891', '40201', '40211', '40291', '40401', '40403'
+                , '40411', '40413', '40491', '40493')
+				  OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) BETWEEN '4254' AND '4259'
+				  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('I43', 'I50') 
+				  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('I099', 'I110', 'I130', 'I132', 'I255', 'I420'
+                  , 'I425', 'I426', 'I427', 'I428', 'I429', 'P290')  
+				THEN 1 ELSE 0 END) AS congestive_heart_failure,
+       --peripheral_vascular_disease
+       MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) IN ('440', '441')
+                  OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) IN ('0930', '4373', '4471', '5571', '5579', 'V434')
+				  OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) BETWEEN '4431' AND '4439'
+				  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('I70', 'I71')
+				  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('I731', 'I738', 'I739', 'I771', 'I790', 'I792', 
+				  'K551', 'K558', 'K559', 'Z958', 'Z959')
+                  THEN 1 ELSE 0 END) AS peripheral_vascular_disease,
+		--Cerebrovascular disease
+	   MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) BETWEEN '430' AND '438'
+                  OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 5) = '36234'
+                  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('G45', 'G46')
+                  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) BETWEEN 'I60' AND 'I69'
+                  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) = 'H340'
+				  THEN 1 ELSE 0 END) AS cerebrovascular_disease,
+		--Dementia
+	   MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) = '290'
+                  OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) IN ('2941', '3312')
+                  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('F00', 'F01', 'F02', 'F03', 'G30')
+                  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('F051', 'G311')
+                  THEN 1 ELSE 0 END) AS dementia,
+	    --Chronic pulmonary disease
+	   MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) BETWEEN '490' AND '505'
+                  OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) IN ('4168', '4169', '5064', '5081', '5088')
+                  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) BETWEEN 'J40' AND 'J47'
+                  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) BETWEEN 'J60' AND 'J67'
+                  OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('I278', 'I279', 'J684', 'J701', 'J703')
+                  THEN 1 ELSE 0 END) AS chronic_pulmonary_disease,
+		--Rheumatic disease
+		MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) = '725'
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) IN ('4465', '7100', '7101', '7102', '7103'
+                                        , '7104', '7140', '7141', '7142', '7148')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('M05', 'M06', 'M32', 'M33', 'M34')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('M315', 'M351', 'M353', 'M360')
+                 THEN 1 ELSE 0 END) AS rheumatic_disease,
+		-- Peptic ulcer disease
+        MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) IN ('531', '532', '533', '534')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('K25', 'K26', 'K27', 'K28')
+                 THEN 1 ELSE 0 END) AS peptic_ulcer_disease,
+        -- Mild liver disease
+        MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) IN ('570', '571')
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) IN ('0706', '0709', '5733', '5734', '5738', '5739', 'V427')
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 5) IN ('07022', '07023', '07032', '07033', '07044', '07054')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('B18', 'K73', 'K74')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('K700', 'K701', 'K702', 'K703', 'K709', 'K713', 
+				   'K714', 'K715', 'K717', 'K760', 'K762', 'K763', 'K764', 'K768', 'K769', 'Z944')
+                 THEN 1 ELSE 0 END) AS mild_liver_disease,
+        -- Diabetes without chronic complication
+        MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) IN ('2500', '2501', '2502', '2503', '2508', '2509')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('E100', 'E101', 'E106', 'E108', 'E109', 'E110', 'E111', 
+				   'E116', 'E118', 'E119', 'E120', 'E121', 'E126', 'E128', 'E129', 'E130', 'E131', 'E136', 'E138', 'E139', 
+				   'E140', 'E141', 'E146', 'E148', 'E149')
+                 THEN 1 ELSE 0 END) AS diabetes_without_cc,
+        -- Diabetes with chronic complication
+        MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) IN ('2504', '2505', '2506', '2507')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('E102', 'E103', 'E104', 'E105', 'E107', 'E112', 'E113', 
+				   'E114', 'E115', 'E117', 'E122', 'E123', 'E124', 'E125', 'E127', 'E132', 'E133', 'E134', 'E135', 'E137', 'E142', 
+				   'E143', 'E144', 'E145', 'E147')
+                 THEN 1 ELSE 0 END) AS diabetes_with_cc,
+        -- Hemiplegia or paraplegia
+        MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) IN ('342', '343')
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) IN ('3341', '3440', '3441', '3442', '3443', '3444', 
+				   '3445', '3446', '3449')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('G81', 'G82')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('G041', 'G114', 'G801', 'G802', 'G830', 'G831', 
+				   'G832', 'G833', 'G834', 'G839')
+                 THEN 1 ELSE 0 END) AS paraplegia,
+        -- Renal disease
+        MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) IN ('582', '585', '586', 'V56')
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) IN ('5880', 'V420', 'V451')
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) BETWEEN '5830' AND '5837'
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 5) IN ('40301', '40311', '40391', '40402', '40403',
+                   '40412', '40413', '40492', '40493')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('N18', 'N19')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('I120', 'I131', 'N032', 'N033', 'N034', 'N035', 
+				   'N036', 'N037', 'N052', 'N053', 'N054', 'N055', 'N056', 'N057', 'N250', 'Z490', 'Z491', 'Z492', 'Z940', 'Z992')
+                 THEN 1 ELSE 0 END) AS renal_disease,
+        -- Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin.
+        MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) BETWEEN '140' AND '172'
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) BETWEEN '1740' AND '1958'
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) BETWEEN '200' AND '208'
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) = '2386'
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('C43', 'C88')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) BETWEEN 'C00' AND 'C26'
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) BETWEEN 'C30' AND 'C34'
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) BETWEEN 'C37' AND 'C41'
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) BETWEEN 'C45' AND 'C58'
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) BETWEEN 'C60' AND 'C76'
+				   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) BETWEEN 'C81' AND 'C85'
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) BETWEEN 'C90' AND 'C97'
+                 THEN 1 ELSE 0 END) AS malignant_cancer,
+        -- Moderate or severe liver disease
+        MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) IN ('4560', '4561', '4562')
+                   OR [icd_version] = '9' AND SUBSTRING(icd_code, 1, 4) BETWEEN '5722' AND '5728'
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 4) IN ('I850', 'I859', 'I864', 'I982', 'K704', 'K711', 
+				   'K721', 'K729', 'K765', 'K766', 'K767')
+                 THEN 1 ELSE 0 END) AS severe_liver_disease,
+        -- Metastatic solid tumor
+        MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) IN ('196', '197', '198', '199')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('C77', 'C78', 'C79', 'C80')
+                 THEN 1 ELSE 0 END) AS metastatic_solid_tumor,
+        -- AIDS/HIV
+        MAX(CASE WHEN [icd_version] = '9' AND SUBSTRING(icd_code, 1, 3) IN ('042', '043', '044')
+                   OR [icd_version] = '10' AND SUBSTRING(icd_code, 1, 3) IN ('B20', 'B21', 'B22', 'B24')
+                 THEN 1 ELSE 0 END) AS aids
+INTO #comorbidities
+FROM #diagnose
+GROUP BY subject_id;
+----(9703 rows affected)
+
+--2.4 extract data from chartevets of patients with 3d hospitalised with AMI as input
+--check icu_or_not
+SELECT a3.subject_id,
+	   CASE WHEN hadm_id IN (SELECT a.hadm_id FROM [dbo].[icustays]) THEN 1 ELSE 0 END AS if_icu
+FROM #AMI_3 AS a3,
+     [dbo].[admissions] AS a
+WHERE a3.latest_AMI_admittime = a.admittime
+  AND a3.subject_id = a.subject_id
+ORDER BY A3.subject_id
+--ANALYSIS: all the patients had icu records when got AMI 
+
+drop table [dbo].[chartevents1]
+--chartevents 6h before hos and 3d after hos
+SELECT ce.[subject_id],
+	   [itemid],
+	   [stay_id],
+	   a3.latest_AMI_admittime,
+	   ce.charttime,
+	   [valuenum]
+INTO [dbo].[chartevents_3]
+FROM [dbo].[chartevents] AS ce,
+     #AMI_3 AS a3
+WHERE a3.subject_id = ce.subject_id
+AND ce.charttime <= DATEADD(DAY, 3, a3.latest_AMI_admittime)
+AND ce.charttime >= DATEADD(HOUR, -6, a3.latest_AMI_admittime)
+--chartevents1 (4197506 rows affected) 24h 3805
+--chartevents2 (7580643 rows affected) 48h 4114
+--chartevents_7 (17956209 rows affected) 7day 4963
+--chartevents_3 (10327327 rows affected) 3day 4351
+
+SELECT DISTINCT[subject_id] FROM [chartevents1]
+
+--fill nulls when empty
+UPDATE [dbo].[chartevents_3]
+SET valuenum = NULL
+WHERE valuenum = '';
+--(2224662 rows affected)
+--convert required valuenum to float
+SELECT *, CAST([valuenum] AS FLOAT) AS value_num
+INTO [dbo].#chartevents_3
+FROM [dbo].[chartevents_3]
+WHERE [itemid] IN (220045, 220179, 220050, 220180, 220051, 220052, 220181, 225312, 
+				   220210, 224690, 223761, 223762, 220277, 225664, 220621, 226537,
+				   226730 )
+--(1519480 rows affected)
+
+--drop table [dbo].[vitalsign_3d]
+--Create vitalsign in 24h as input variables
+SELECT subject_id,
+	ROUND(AVG(case when itemid in (220045) and value_num > 0 and value_num < 300 then value_num else null end), 2) as heart_rate,
+	ROUND(AVG(case when itemid in (220179, 220050) and value_num > 0 and value_num < 400 then value_num else null end), 2) as sbp,
+	ROUND(AVG(case when itemid in (220180, 220051) and value_num > 0 and value_num < 300 then value_num else null end), 2) as dbp,
+	ROUND(AVG(case when itemid in (220052, 220181, 225312) and value_num > 0 and value_num < 300 then value_num else null end), 2) as mbp,
+	ROUND(AVG(case when itemid in (220210, 224690) and value_num > 0 and value_num < 70 then value_num else null end), 2) as resp_rate,
+	ROUND(AVG(case when itemid in (223761) and value_num > 70 and value_num < 120 then (value_num-32)/1.8 
+				   when itemid in (223762) and value_num > 10 and value_num < 50  then value_num else null end), 2) as temperature,
+	ROUND(AVG(case when itemid in (220277) and value_num > 0 and value_num <= 100 then value_num else null end), 2) as spo2
+INTO [dbo].[vitalsign_3d]
+FROM #chartevents_3
+WHERE value_num IS NOT NULL
+GROUP BY subject_id
+select * from [dbo].[vitalsign_3d]
+--(4341 rows affected)
+
+--2.5 extract data from labevent of patients with 3d hospitalised with AMI as input
+--drop table [dbo].[labevents1]
+--labevents 6h before hos and 24h after hos
+SELECT le.[subject_id],
+	   [itemid],
+	   a3.latest_AMI_admittime,
+	   le.charttime,
+	   [value],
+	   [valuenum]
+INTO [dbo].[labevents_3]
+FROM [dbo].[labevents] AS le,
+     #AMI_3 AS a3
+WHERE a3.subject_id = le.subject_id
+AND le.charttime <= DATEADD(DAY, 3, a3.latest_AMI_admittime)
+AND le.charttime >= DATEADD(HOUR, -6, a3.latest_AMI_admittime)
+--(996564 rows affected)
+
+--select * from [dbo].[labevents1] where itemid = 51003
+--fill nulls when empty
+UPDATE [dbo].[labevents_3]
+SET valuenum = NULL
+WHERE valuenum = '';
+--convert valuenum to float
+--drop table #labevents2
+SELECT *, CAST([valuenum] AS FLOAT) AS value_num
+INTO #labevents3
+FROM [dbo].[labevents_3]
+WHERE [itemid] IN (51003, 50911, 50862, 50930, 50976, 50868, 50882,
+                   51006, 50893, 50902, 50912, 50931, 50983, 50971)
+
+--drop table [dbo].[lab_3d]
+--Create lab test in 3d as input variables
+SELECT [subject_id],
+    ROUND(AVG(CASE WHEN itemid = 51003 THEN value_num ELSE NULL END), 2) AS troponin_t,
+    ROUND(AVG(CASE WHEN itemid = 50911 THEN value_num ELSE NULL END), 2) AS ck_mb,
+    ROUND(AVG(CASE WHEN itemid = 50868 AND value_num <= 10000 THEN value_num ELSE NULL END), 2) AS aniongap,
+    ROUND(AVG(CASE WHEN itemid = 50882 AND value_num <= 10000 THEN value_num ELSE NULL END), 2) AS bicarbonate,
+    ROUND(AVG(CASE WHEN itemid = 51006 AND value_num <=   300 THEN value_num ELSE NULL END), 2) AS bun,
+    ROUND(AVG(CASE WHEN itemid = 50893 AND value_num <= 10000 THEN value_num ELSE NULL END), 2) AS calcium,
+    ROUND(AVG(CASE WHEN itemid = 50902 AND value_num <= 10000 THEN value_num ELSE NULL END), 2) AS chloride,
+    ROUND(AVG(CASE WHEN itemid = 50912 AND value_num <=   150 THEN value_num ELSE NULL END), 2) AS creatinine,
+    ROUND(AVG(CASE WHEN itemid = 50931 AND value_num <= 10000 THEN value_num ELSE NULL END), 2) AS glucose,
+    ROUND(AVG(CASE WHEN itemid = 50983 AND value_num <=   200 THEN value_num ELSE NULL END), 2) AS sodium,
+    ROUND(AVG(CASE WHEN itemid = 50971 AND value_num <=    30 THEN value_num ELSE NULL END), 2) AS potassium
+INTO [dbo].[lab_3d]
+FROM #labevents3
+WHERE value_num IS NOT NULL
+GROUP BY subject_id
+--(9668 rows affected)
+
+------------------STEP 3  create the dependent variables-------------------
+--drop table #dep
+SELECT subject_id,
+	   CASE WHEN DATEDIFF(DAY, latest_AMI_admittime, dod) BETWEEN 0 AND 90 AND dod IS NOT NULL THEN 1 ELSE 0 END AS status
+INTO #dep
+FROM #AMI_3
+--(9703 rows affected)
+
+SELECT *
+FROM #AMI_3
+WHERE DATEDIFF(DAY, latest_AMI_admittime, dod) BETWEEN 0 AND 90
+--mortality
+--7days  706    7.2%
+--15days 1036   10.6%
+--30days 1406   14.5%
+--45days 1590   16.4%
+--60days 1742   18%
+--90days 1973   20.3%
+--120days 2085  21.5%
+--180days 2323  24%
+--360days 2774  28.6%
+
+------------------STEP 3  Merge tables-------------------
+--drop table #tab1
+--#AMI_3 and #demographics1 and #AMIhistory_count
+SELECT d.*, acount.AMIhistory_count
+INTO #tab1
+FROM #AMI_3 AS a3,
+     [dbo].[admissions] AS a,
+	 #demographics1 AS d,
+	 #AMIhistory_count AS acount
+WHERE a3.latest_AMI_admittime = a.admittime
+  AND a3.subject_id = a.subject_id
+  AND d.hadm_id = a.hadm_id
+  AND acount.subject_id = d.subject_id
+--(9703 rows affected)
+
+--#tab1 and #comorbidities
+SELECT #tab1.*,
+       #comorbidities.congestive_heart_failure,
+	   #comorbidities.peripheral_vascular_disease,
+	   #comorbidities.cerebrovascular_disease,
+	   #comorbidities.dementia,
+	   #comorbidities.chronic_pulmonary_disease,
+	   #comorbidities.rheumatic_disease,
+	   #comorbidities.peptic_ulcer_disease,
+	   #comorbidities.mild_liver_disease,
+	   #comorbidities.diabetes_without_cc,
+	   #comorbidities.diabetes_with_cc,
+	   #comorbidities.paraplegia,
+	   #comorbidities.renal_disease,
+	   #comorbidities.malignant_cancer,
+	   #comorbidities.severe_liver_disease,
+	   #comorbidities.metastatic_solid_tumor,
+	   #comorbidities.aids
+INTO #tab2
+FROM #tab1,
+     #comorbidities
+WHERE #comorbidities.subject_id = #tab1.subject_id
+
+--#tab2 and [dbo].[vitalsign_7d]
+SELECT #tab2.*,
+       v.[heart_rate],
+       v.[sbp],
+       v.[dbp],
+       v.[mbp],
+       v.[resp_rate],
+       v.[temperature],
+       v.[spo2]   
+INTO #tab3
+FROM #tab2
+LEFT JOIN [dbo].[vitalsign_3d] as v
+ON #tab2.subject_id = v.subject_id
+--(9703 rows affected)
+
+--DROP TABLE [dbo].[AMI_data90]
+--#tab3 and [dbo].[lab_24h]
+SELECT #tab3.*,
+       l.[troponin_t],
+       l.[ck_mb],
+       l.[aniongap],
+       l.[bicarbonate],
+       l.[bun],
+       l.[calcium],
+       l.[chloride],
+       l.[creatinine],
+       l.[glucose],
+       l.[sodium],
+       l.[potassium]
+INTO #tab4
+FROM #tab3
+LEFT JOIN [dbo].[lab_3d] AS l
+ON #tab3.subject_id = l.subject_id
+--(9703 rows affected)
+
+--#tab4 and admission_type
+SELECT #tab4.*, a.admission_type
+INTO #tab5
+FROM #tab4
+LEFT JOIN [dbo].[admissions] AS a
+ON #tab4.hadm_id = a.hadm_id
+--(9703 rows affected)
+
+--#tab5 and #dep
+SELECT #tab5.*, #dep.status
+INTO [dbo].[AMI_data_90]
+FROM #tab5,
+     #dep
+WHERE #dep.subject_id = #tab5.subject_id
+--(9703 rows affected)
+
+
+------------------STEP 3  clean data-------------------
+--marital_status- string
+UPDATE [dbo].[AMI_data_90]
+SET marital_status = 'UNKNOWN'
+WHERE marital_status = '';
+
+--marital_status- number
+UPDATE [dbo].[AMI_data_90]
+SET  marital_status = 
+     CASE 
+	     WHEN marital_status = 'MARRIED' THEN 1
+		 WHEN marital_status = 'SINGLE' THEN 2
+		 WHEN marital_status = 'DIVORCED' THEN 3
+		 WHEN marital_status = 'WIDOWED' THEN 4
+		 WHEN marital_status = '' THEN 5 END;
+
+--gender-number
+UPDATE [dbo].[AMI_data_90]
+SET  gender = 
+     CASE 
+		 WHEN gender = 'M' THEN 1
+		 WHEN gender = 'F' THEN 2 END;
+
+--race 1-'Hispanic/Latino', 2-'Black/African American', 3-'White/European', 4-'Asian', 5-'Other/Multiple'
+UPDATE [dbo].[AMI_data_90]
+SET race = 
+    CASE 
+        WHEN race IN ('HISPANIC/LATINO - HONDURAN', 'HISPANIC/LATINO - GUATEMALAN', 'HISPANIC/LATINO - MEXICAN', 
+		              'HISPANIC/LATINO - COLUMBIAN', 'HISPANIC/LATINO - SALVADORAN', 'HISPANIC/LATINO - PUERTO RICAN',
+                      'HISPANIC/LATINO - CENTRAL AMERICAN', 'HISPANIC/LATINO - DOMINICAN', 'HISPANIC/LATINO - CUBAN', 
+                      'HISPANIC OR LATINO') THEN 1
+        WHEN race IN ('ASIAN - ASIAN INDIAN', 'ASIAN', 'ASIAN - KOREAN', 'ASIAN - CHINESE', 'ASIAN - SOUTH EAST ASIAN') THEN 4
+        WHEN race IN ('BLACK/CARIBBEAN ISLAND', 'BLACK/AFRICAN AMERICAN', 'BLACK/CAPE VERDEAN', 'BLACK/AFRICAN') THEN 2
+        WHEN race IN ('WHITE - RUSSIAN', 'PORTUGUESE', 'WHITE - OTHER EUROPEAN', 'WHITE - BRAZILIAN', 'WHITE', 'WHITE - EASTERN EUROPEAN') THEN 3
+        ELSE 5
+    END;
+
+--admission type
+--'Elective'-0   'Emergency'-1
+UPDATE [dbo].[AMI_data_90]
+SET admission_type = 
+    CASE 
+	    WHEN admission_type IN ('AMBULATORY OBSERVATION', 'DIRECT EMER.', 'URGENT', 'EW EMER.', 'DIRECT OBSERVATION', 'EU OBSERVATION', 'OBSERVATION ADMIT') THEN 1
+		ELSE 0
+	END;
+
+
+--missing value with average in each class
+-- Update rows with status 0 and 1
+WITH cte AS (
+    SELECT status,
+        ROUND(AVG([heart_rate]), 2) AS avg_heart_rate,
+        ROUND(AVG([sbp]), 2) AS avg_sbp,
+        ROUND(AVG([dbp]), 2) AS avg_dbp,
+        ROUND(AVG([mbp]), 2) AS avg_mbp,
+        ROUND(AVG([resp_rate]), 2) AS avg_resp_rate,
+        ROUND(AVG([temperature]), 2) AS avg_temperature,
+        ROUND(AVG([spo2]), 2) AS avg_spo2,
+        ROUND(AVG([troponin_t]), 2) AS avg_troponin_t,
+        ROUND(AVG([ck_mb]), 2) AS avg_ck_mb,
+        ROUND(AVG([aniongap]), 2) AS avg_aniongap,
+        ROUND(AVG([bicarbonate]), 2) AS avg_bicarbonate,
+        ROUND(AVG([bun]), 2) AS avg_bun,
+        ROUND(AVG([calcium]), 2) AS avg_calcium,
+        ROUND(AVG([chloride]), 2) AS avg_chloride,
+        ROUND(AVG([creatinine]), 2) AS avg_creatinine,
+        ROUND(AVG([glucose]), 2) AS avg_glucose,
+        ROUND(AVG([sodium]), 2) AS avg_sodium,
+        ROUND(AVG([potassium]), 2) AS avg_potassium
+    FROM [dbo].[AMI_data_90]
+    GROUP BY status
+)
+UPDATE [dbo].[AMI_data_90]
+SET 
+    heart_rate = CASE
+        WHEN heart_rate IS NULL AND status = 0 THEN (SELECT avg_heart_rate FROM cte WHERE status = 0)
+        WHEN heart_rate IS NULL AND status = 1 THEN (SELECT avg_heart_rate FROM cte WHERE status = 1)
+        ELSE heart_rate
+    END,
+    sbp = CASE
+        WHEN sbp IS NULL AND status = 0 THEN (SELECT avg_sbp FROM cte WHERE status = 0)
+        WHEN sbp IS NULL AND status = 1 THEN (SELECT avg_sbp FROM cte WHERE status = 1)
+        ELSE sbp
+    END,
+    dbp = CASE
+        WHEN dbp IS NULL AND status = 0 THEN (SELECT avg_dbp FROM cte WHERE status = 0)
+        WHEN dbp IS NULL AND status = 1 THEN (SELECT avg_dbp FROM cte WHERE status = 1)
+        ELSE dbp
+    END,
+    mbp = CASE
+        WHEN mbp IS NULL AND status = 0 THEN (SELECT avg_mbp FROM cte WHERE status = 0)
+        WHEN mbp IS NULL AND status = 1 THEN (SELECT avg_mbp FROM cte WHERE status = 1)
+        ELSE mbp
+    END,
+    resp_rate = CASE
+        WHEN resp_rate IS NULL AND status = 0 THEN (SELECT avg_resp_rate FROM cte WHERE status = 0)
+        WHEN resp_rate IS NULL AND status = 1 THEN (SELECT avg_resp_rate FROM cte WHERE status = 1)
+        ELSE resp_rate
+    END,
+    temperature = CASE
+        WHEN temperature IS NULL AND status = 0 THEN (SELECT avg_temperature FROM cte WHERE status = 0)
+        WHEN temperature IS NULL AND status = 1 THEN (SELECT avg_temperature FROM cte WHERE status = 1)
+        ELSE temperature
+    END,
+    spo2 = CASE
+        WHEN spo2 IS NULL AND status = 0 THEN (SELECT avg_spo2 FROM cte WHERE status = 0)
+        WHEN spo2 IS NULL AND status = 1 THEN (SELECT avg_spo2 FROM cte WHERE status = 1)
+        ELSE spo2
+    END,
+    troponin_t = CASE
+        WHEN troponin_t IS NULL AND status = 0 THEN (SELECT avg_troponin_t FROM cte WHERE status = 0)
+        WHEN troponin_t IS NULL AND status = 1 THEN (SELECT avg_troponin_t FROM cte WHERE status = 1)
+        ELSE troponin_t
+    END,
+    ck_mb = CASE
+        WHEN ck_mb IS NULL AND status = 0 THEN (SELECT avg_ck_mb FROM cte WHERE status = 0)
+        WHEN ck_mb IS NULL AND status = 1 THEN (SELECT avg_ck_mb FROM cte WHERE status = 1)
+        ELSE ck_mb
+    END,
+    aniongap = CASE
+        WHEN aniongap IS NULL AND status = 0 THEN (SELECT avg_aniongap FROM cte WHERE status = 0)
+        WHEN aniongap IS NULL AND status = 1 THEN (SELECT avg_aniongap FROM cte WHERE status = 1)
+        ELSE aniongap
+    END,
+    bicarbonate = CASE
+        WHEN bicarbonate IS NULL AND status = 0 THEN (SELECT avg_bicarbonate FROM cte WHERE status = 0)
+        WHEN bicarbonate IS NULL AND status = 1 THEN (SELECT avg_bicarbonate FROM cte WHERE status = 1)
+        ELSE bicarbonate
+    END,
+    bun = CASE
+        WHEN bun IS NULL AND status = 0 THEN (SELECT avg_bun FROM cte WHERE status = 0)
+        WHEN bun IS NULL AND status = 1 THEN (SELECT avg_bun FROM cte WHERE status = 1)
+        ELSE bun
+    END,
+    calcium = CASE
+        WHEN calcium IS NULL AND status = 0 THEN (SELECT avg_calcium FROM cte WHERE status = 0)
+        WHEN calcium IS NULL AND status = 1 THEN (SELECT avg_calcium FROM cte WHERE status = 1)
+        ELSE calcium
+    END,
+    chloride = CASE
+        WHEN chloride IS NULL AND status = 0 THEN (SELECT avg_chloride FROM cte WHERE status = 0)
+        WHEN chloride IS NULL AND status = 1 THEN (SELECT avg_chloride FROM cte WHERE status = 1)
+        ELSE chloride
+    END,
+    creatinine = CASE
+        WHEN creatinine IS NULL AND status = 0 THEN (SELECT avg_creatinine FROM cte WHERE status = 0)
+        WHEN creatinine IS NULL AND status = 1 THEN (SELECT avg_creatinine FROM cte WHERE status = 1)
+        ELSE creatinine
+    END,
+    glucose = CASE
+        WHEN glucose IS NULL AND status = 0 THEN (SELECT avg_glucose FROM cte WHERE status = 0)
+        WHEN glucose IS NULL AND status = 1 THEN (SELECT avg_glucose FROM cte WHERE status = 1)
+        ELSE glucose
+    END,
+    sodium = CASE
+        WHEN sodium IS NULL AND status = 0 THEN (SELECT avg_sodium FROM cte WHERE status = 0)
+        WHEN sodium IS NULL AND status = 1 THEN (SELECT avg_sodium FROM cte WHERE status = 1)
+        ELSE sodium
+    END,
+    potassium = CASE
+        WHEN potassium IS NULL AND status = 0 THEN (SELECT avg_potassium FROM cte WHERE status = 0)
+        WHEN potassium IS NULL AND status = 1 THEN (SELECT avg_potassium FROM cte WHERE status = 1)
+        ELSE potassium
+    END; 
 
